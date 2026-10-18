@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let sessionItem = NSMenuItem(title: "Session: –", action: nil, keyEquivalent: "")
     let weeklyItem = NSMenuItem(title: "Weekly: –", action: nil, keyEquivalent: "")
     let updatedItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    var lastUpdated: String?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.button?.title = "✳︎ …"
@@ -100,7 +101,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func fetch(retries: Int, renewed: Bool) {
         DispatchQueue.global().async {
             guard let t = self.token(forceRenew: renewed) else {
-                DispatchQueue.main.async { self.item.button?.title = "✳︎ no login" }
+                DispatchQueue.main.async {
+                    self.item.button?.title = "✳︎ no login"
+                    // Keep the old numbers visible, but make clear they're stale
+                    self.updatedItem.title = "Not logged in – run `claude /login`" + (self.lastUpdated.map { " (data from \($0))" } ?? "")
+                }
                 return
             }
             var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -130,7 +135,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.sessionItem.title = "Session (5h): \(sp)%" + self.resetText(s?["resets_at"] as? String)
                     self.weeklyItem.title = "Weekly: \(wp)%" + self.resetText(w?["resets_at"] as? String)
                     let df = DateFormatter(); df.timeStyle = .short
-                    self.updatedItem.title = "Updated \(df.string(from: Date()))"
+                    self.lastUpdated = df.string(from: Date())
+                    self.updatedItem.title = "Updated \(self.lastUpdated!)"
                 }
             }.resume()
         }
