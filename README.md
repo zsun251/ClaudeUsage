@@ -7,7 +7,7 @@ It reads the Claude Code sign-in from the login keychain at runtime (and renews 
 ## Build
 
 ```sh
-swiftc -O main.swift -o ClaudeUsage
+swiftc -O main.swift -o ~/Applications/ClaudeUsage
 ```
 
 ## Run at login
@@ -17,4 +17,4 @@ cp com.user.claudeusage.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.user.claudeusage.plist
 ```
 
-Edit the path inside the plist if the app is not at `~/Applications/ClaudeUsage/ClaudeUsage`.
+The source stays in this repo; the built app goes to `~/Applications/ClaudeUsage`. Edit the path inside the plist if it is elsewhere.
