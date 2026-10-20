@@ -28,18 +28,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openPage() { NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/usage")!) }
 
-    func run(_ path: String, _ args: [String], input: String? = nil) -> Data? {
-        let p = Process(); let pipe = Pipe(); let inPipe = Pipe()
+    func run(_ path: String, _ args: [String]) -> Data? {
+        let p = Process(); let pipe = Pipe()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        if input != nil { p.standardInput = inPipe }
         guard (try? p.run()) != nil else { return nil }
-        if let input {
-            inPipe.fileHandleForWriting.write(input.data(using: .utf8)!)
-            try? inPipe.fileHandleForWriting.close()
-        }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return data
@@ -52,40 +47,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    // Access tokens last ~8h, so after a long sleep it has usually expired.
-    // Renew it the same way Claude Code does and write it back, since the refresh token rotates.
-    func token(forceRenew: Bool = false) -> String? {
-        guard var j = credentials(), var o = j["claudeAiOauth"] as? [String: Any] else { return nil }
-        let expiresAt = (o["expiresAt"] as? Double ?? 0) / 1000
-        if !forceRenew && expiresAt > Date().timeIntervalSince1970 + 60 { return o["accessToken"] as? String }
-        guard let rt = o["refreshToken"] as? String else { return nil }
-        var req = URLRequest(url: URL(string: "https://platform.claude.com/v1/oauth/token")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "grant_type": "refresh_token", "refresh_token": rt,
-            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-            "scope": ((o["scopes"] as? [String]) ?? []).joined(separator: " ")])
-        var result: [String: Any]?
-        let done = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
-            if (resp as? HTTPURLResponse)?.statusCode == 200, let data {
-                result = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            }
-            done.signal()
-        }.resume()
-        done.wait()
-        guard let r = result, let at = r["access_token"] as? String, let exp = r["expires_in"] as? Double else { return nil }
-        o["accessToken"] = at
-        if let newRt = r["refresh_token"] as? String { o["refreshToken"] = newRt }
-        o["expiresAt"] = (Date().timeIntervalSince1970 + exp) * 1000
-        j["claudeAiOauth"] = o
-        if let out = try? JSONSerialization.data(withJSONObject: j) {
-            // Hex via stdin so the secret never appears in process arguments
-            let hex = out.map { String(format: "%02x", $0) }.joined()
-            _ = run("/usr/bin/security", ["-i"], input: "add-generic-password -U -a \(NSUserName()) -s \"\(service)\" -X \(hex)\n")
-        }
-        return at
+    // Read-only: never renew here. The refresh token rotates, so renewing would
+    // invalidate the copy a running Claude Code holds and log it out.
+    // An expired token (~8h) is left for Claude Code to renew on its next use.
+    func token() -> String? {
+        guard let o = credentials()?["claudeAiOauth"] as? [String: Any],
+              (o["expiresAt"] as? Double ?? 0) / 1000 > Date().timeIntervalSince1970 + 60 else { return nil }
+        return o["accessToken"] as? String
+    }
+
+    // Keep the old numbers visible, but make clear they're stale
+    func showStale() {
+        item.button?.title = "✳︎ stale"
+        updatedItem.title = "Login expired – open `claude` to renew" + (lastUpdated.map { " (data from \($0))" } ?? "")
     }
 
     func resetText(_ iso: String?) -> String {
@@ -96,16 +70,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return "  (resets " + r.localizedString(for: d, relativeTo: Date()) + ")"
     }
 
-    @objc func refresh() { fetch(retries: 3, renewed: false) }
+    @objc func refresh() { fetch(retries: 3) }
 
-    func fetch(retries: Int, renewed: Bool) {
+    func fetch(retries: Int) {
         DispatchQueue.global().async {
-            guard let t = self.token(forceRenew: renewed) else {
-                DispatchQueue.main.async {
-                    self.item.button?.title = "✳︎ no login"
-                    // Keep the old numbers visible, but make clear they're stale
-                    self.updatedItem.title = "Not logged in – run `claude /login`" + (self.lastUpdated.map { " (data from \($0))" } ?? "")
-                }
+            guard let t = self.token() else {
+                DispatchQueue.main.async { self.showStale() }
                 return
             }
             var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -113,13 +83,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
             URLSession.shared.dataTask(with: req) { data, resp, _ in
                 let code = (resp as? HTTPURLResponse)?.statusCode
-                // Token rejected: renew it, then retry once
-                if code == 401 && !renewed {
-                    self.fetch(retries: retries, renewed: true); return
+                // Token rejected: wait for Claude Code to renew it
+                if code == 401 {
+                    DispatchQueue.main.async { self.showStale() }
+                    return
                 }
                 // Network not ready yet (e.g. just woke up): retry in 30s
                 if code == nil && retries > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.fetch(retries: retries - 1, renewed: renewed) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.fetch(retries: retries - 1) }
                     return
                 }
                 DispatchQueue.main.async {
